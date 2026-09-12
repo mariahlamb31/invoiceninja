@@ -12,6 +12,11 @@ namespace App\Services\Pdf;
 
 class Purify
 {
+    /**
+     * 1×1 transparent PNG used when a remote image cannot be inlined.
+     */
+    private const TRANSPARENT_PNG_DATA_URI = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
     private static array $allowed_elements = [
         // Document structure
         'html', 'head', 'body', 'meta', 'title', 'style',
@@ -245,7 +250,7 @@ class Purify
 
         $css = preg_replace('/\/\*.*?\*\//s', '', $css);
 
-        $css = preg_replace('/[^{}]*invoiceninja[\-_]whitelabel[^{}]*\{[^}]*\}/i', '', $css);
+        $css = self::stripWhitelabelCssRules($css);
 
         // Normalize CSS unicode escapes before filtering
         $css = preg_replace_callback(
@@ -259,6 +264,40 @@ class Purify
         $css = preg_replace('/file\s*:\s*\/\//i', '', $css);
 
         return $css;
+    }
+
+    /**
+     * Drop CSS rules that mention the Invoice Ninja whitelabel logo.
+     *
+     * Tokenises on '}' so each rule is examined once (O(n)). The previous
+     * unanchored `[^{}]*invoiceninja[\-_]whitelabel` regex restarts at every
+     * offset and is quadratic on brace-free input that repeats the needle.
+     */
+    private static function stripWhitelabelCssRules(string $css): string
+    {
+        if (stripos($css, 'invoiceninja-whitelabel') === false
+            && stripos($css, 'invoiceninja_whitelabel') === false) {
+            return $css;
+        }
+
+        $parts = explode('}', $css);
+        $count = count($parts);
+        $kept = [];
+
+        foreach ($parts as $i => $part) {
+            $rule = ($i === $count - 1) ? $part : $part . '}';
+
+            if ($rule === '') {
+                continue;
+            }
+
+            if (stripos($rule, 'invoiceninja-whitelabel') === false
+                && stripos($rule, 'invoiceninja_whitelabel') === false) {
+                $kept[] = $rule;
+            }
+        }
+
+        return implode('', $kept);
     }
 
     private static array $dangerous_svg_elements = [
@@ -345,16 +384,21 @@ class Purify
      *
      * @param  string $html
      * @param  bool $is_fragment
+     * @param  bool $inline_pdf_images When true, remote image URLs are fetched
+     *                                 server-side and replaced with data: URIs
+     *                                 before PDF render.
      * @return string
      */
-    public static function clean(string $html, bool $is_fragment = false): string
+    public static function clean(string $html, bool $is_fragment = false, bool $inline_pdf_images = false): string
     {
 
         if (config('ninja.disable_purify_html') || strlen($html) <= 1) {
-            return str_replace('%24', '$', $html);
+            $html = str_replace('%24', '$', $html);
+        } else {
+            $html = self::sanitizeHtml($html, $is_fragment, $inline_pdf_images);
         }
 
-        return self::sanitizeHtml($html, $is_fragment);
+        return $html;
     }
 
     /**
@@ -372,7 +416,7 @@ class Purify
         return self::sanitizeHtml($html, $is_fragment);
     }
 
-    private static function sanitizeHtml(string $html, bool $is_fragment): string
+    private static function sanitizeHtml(string $html, bool $is_fragment, bool $inline_pdf_images = false): string
     {
 
         $html = str_replace('%24', '$', $html);
@@ -400,8 +444,10 @@ class Purify
 
         @$document->loadHTML(htmlspecialchars_decode(htmlspecialchars($html, ENT_QUOTES, 'UTF-8')), LIBXML_NONET);
 
+        $imageFetcher = $inline_pdf_images ? new ImageFetcher() : null;
+
         // Function to recursively check nodes
-        $cleanNodes = function ($node) use (&$cleanNodes) {
+        $cleanNodes = function ($node) use (&$cleanNodes, $imageFetcher) {
 
             $allowed_elements = self::$allowed_elements;
             $allowed_attributes = self::$allowed_attributes;
@@ -510,7 +556,7 @@ class Purify
                                 // nlog("data:image/* regex");
                                 $regex = '^data\:image\/[a-zA-Z0-9\+]+;base64,.*$';
                             } else {
-                                $regex = preg_quote($pattern, '/');
+                                $regex = '^' . preg_quote($pattern, '/') . '$';
                                 $regex = str_replace('\*', '.*', $regex);
                             }
 
@@ -523,6 +569,10 @@ class Purify
                         if ($is_allowed) {
                             $is_http = str_starts_with($value, 'http://') || str_starts_with($value, 'https://');
                             if (!$is_http || self::isHostSafe($value)) {
+                                if ($attr_name === 'src' && $imageFetcher !== null && self::isRemoteImageUrl($value)) {
+                                    $value = $imageFetcher->inline($value) ?? self::TRANSPARENT_PNG_DATA_URI;
+                                }
+
                                 $node->setAttribute($name, $value);
                             }
                         }
@@ -583,6 +633,11 @@ class Purify
             libxml_clear_errors();
         }
 
+    }
+
+    private static function isRemoteImageUrl(string $url): bool
+    {
+        return str_starts_with($url, 'http://') || str_starts_with($url, 'https://');
     }
 
 }

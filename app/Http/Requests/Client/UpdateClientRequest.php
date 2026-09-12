@@ -63,11 +63,13 @@ class UpdateClientRequest extends Request
         $rules['classification'] = 'bail|sometimes|nullable|in:individual,business,company,partnership,trust,charity,government,other';
         $rules['id_number'] = ['sometimes', 'bail', 'nullable', Rule::unique('clients')->where('company_id', $user->company()->id)->ignore($this->client->id)];
         $rules['number'] = ['sometimes', 'bail', Rule::unique('clients')->where('company_id', $user->company()->id)->ignore($this->client->id)];
-
+        $rules['group_settings_id'] = ['bail','nullable','sometimes', Rule::exists('group_settings', 'id')->where('company_id', $user->company()->id)];
+        
         $rules['e_invoice'] = ['sometimes','nullable', new ValidClientScheme()];
 
         $rules['settings'] = new ValidClientGroupSettingsRule();
         $rules['contacts'] = 'array';
+        $rules['contacts.*.id'] = ['bail','nullable','sometimes', Rule::exists('client_contacts', 'id')->where('client_id', $this->client->id)->where('company_id', $user->company()->id)];
         $rules['contacts.*.email'] = 'bail|nullable|distinct|sometimes|email';
         $rules['contacts.*.password'] = [
             'nullable',
@@ -242,6 +244,7 @@ class UpdateClientRequest extends Request
             return $settings;
         }
 
+        $settings = is_array($settings) ? (object) $settings : $settings;
         $saveable_casts = CompanySettings::$free_plan_casts;
 
         foreach ($settings as $key => $value) {
@@ -249,14 +252,11 @@ class UpdateClientRequest extends Request
                 unset($settings->{$key});
             }
 
-            //26-04-2022 - In case settings are returned as array instead of object
-            if ($key == 'default_task_rate' && is_array($settings)) {
-                $settings['default_task_rate'] = floatval($value);
-            } elseif ($key == 'default_task_rate' && is_object($settings)) {
+            if ($key == 'default_task_rate') {
                 $settings->default_task_rate = floatval($value);
             }
         }
 
-        return $settings;
+        return (array) $settings;
     }
 }

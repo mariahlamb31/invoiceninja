@@ -5,10 +5,11 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "production": "vite build",
-    "test:e2e": "playwright test --workers=1",
-    "test:e2e:headed": "playwright test --headed",
-    "test:e2e:ui": "playwright test --ui",
-    "test:e2e:report": "playwright show-report tests/e2e/report"
+    "test:e2e": "playwright test --project=chromium --workers=1",
+    "test:e2e:headed": "playwright test --project=chromium --workers=1 --headed",
+    "test:e2e:ui": "playwright test --project=chromium --workers=1 --ui",
+    "test:e2e:report": "playwright show-report tests/e2e/report",
+    "test:e2e:kill": "pkill -f 'ms-playwright/chromium|@playwright/test/cli.js (test-server|run-server)' || true"
   },
   "devDependencies": {
     "@babel/compat-data": "7.29.7",
@@ -32,7 +33,7 @@
   "dependencies": {
     "@apidevtools/swagger-parser": "^10.1.1",
     "@checkout.com/checkout-web-components": "^1.11.0",
-    "@docuninja/builder2.0": "^0.0.102",
+    "@docuninja/builder2.0": "^0.0.105",
     "axios": "^0.32",
     "card-js": "^1.0.13",
     "card-validator": "^8.1.1",

@@ -19,6 +19,7 @@ use Stripe\Account;
 use Stripe\Customer;
 use App\Models\Client;
 use App\Models\Payment;
+use Stripe\Mandate;
 use Stripe\SetupIntent;
 use Stripe\StripeClient;
 use App\Models\SystemLog;
@@ -43,7 +44,6 @@ use App\PaymentDrivers\Stripe\Alipay;
 use App\PaymentDrivers\Stripe\Charge;
 use App\PaymentDrivers\Stripe\Klarna;
 use App\PaymentDrivers\Stripe\SOFORT;
-use Illuminate\Http\RedirectResponse;
 use App\PaymentDrivers\Stripe\GIROPAY;
 use Stripe\Exception\ApiErrorException;
 use App\Exceptions\StripeConnectFailure;
@@ -52,6 +52,7 @@ use App\PaymentDrivers\Stripe\Bancontact;
 use App\PaymentDrivers\Stripe\BrowserPay;
 use App\PaymentDrivers\Stripe\CreditCard;
 use App\PaymentDrivers\Stripe\PRZELEWY24;
+use App\PaymentDrivers\Stripe\PromptPay;
 use App\PaymentDrivers\Stripe\BankTransfer;
 use App\PaymentDrivers\Stripe\Connect\Verify;
 use App\PaymentDrivers\Stripe\ImportCustomers;
@@ -104,6 +105,7 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
         GatewayType::KLARNA => Klarna::class,
         GatewayType::BACS => BACS::class,
         GatewayType::DIRECT_DEBIT => BankTransfer::class,
+        GatewayType::PROMPTPAY => PromptPay::class,
     ];
 
     public const SYSTEM_LOG_TYPE = SystemLog::TYPE_STRIPE;
@@ -268,6 +270,13 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
            && in_array($this->client->country->iso_3166_3, ['AUT','BEL','DNK','FIN','FRA','DEU','IRL','ITA','NLD','NOR','ESP','SWE','GBR','USA'])) {
             $types[] = GatewayType::KLARNA;
         }
+        if ($this->client
+           && $this->client->currency()
+           && ($this->client->currency()->code == 'THB')
+           && isset($this->client->country)
+           && in_array($this->client->country->iso_3166_3, ['THA'])) {
+            $types[] = GatewayType::PROMPTPAY;
+        }
 
         if (
             $this->client
@@ -321,6 +330,8 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
                 return 'gateways.stripe.acss';
             case GatewayType::FPX:
                 return 'gateways.stripe.fpx';
+            case GatewayType::PROMPTPAY:
+                return 'gateways.stripe.promptpay';
             default:
                 break;
         }
@@ -330,8 +341,8 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
     {
         $fields = [];
 
-         /** Nacha requires a complete billing address on the us_bank_account payment method. */
-         $requires_billing_address = $this->payment_method instanceof ACH;
+        /** Nacha requires a complete billing address on the us_bank_account payment method. */
+        $requires_billing_address = $this->payment_method instanceof ACH;
 
         if ($this->company_gateway->require_client_name) {
             $fields[] = ['name' => 'client_name', 'label' => ctrans('texts.client_name'), 'type' => 'text', 'validation' => 'required'];
@@ -493,12 +504,17 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
      */
     public function getSetupIntent(): SetupIntent
     {
+        return $this->createSetupIntent(['usage' => 'off_session']);
+    }
+
+    public function createSetupIntent(array $params): SetupIntent
+    {
         $this->init();
 
-        $params = ['usage' => 'off_session'];
-        $meta = $this->stripe_connect_auth;
-
-        return SetupIntent::create($params, array_merge($meta, ['idempotency_key' => uniqid("st", true)]));
+        return SetupIntent::create(
+            $params,
+            array_merge($this->stripe_connect_auth, ['idempotency_key' => uniqid('st', true)])
+        );
     }
 
     public function getSetupIntentId(string $id): SetupIntent
@@ -506,6 +522,16 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
         $this->init();
 
         return SetupIntent::retrieve(
+            $id,
+            $this->stripe_connect_auth
+        );
+    }
+
+    public function getMandate(string $id): Mandate
+    {
+        $this->init();
+
+        return Mandate::retrieve(
             $id,
             $this->stripe_connect_auth
         );
@@ -634,6 +660,25 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
         return true;
     }
 
+    public function syncAchPaymentMethodBillingAddress(ClientGatewayToken $token): void
+    {
+        // if (! str_starts_with($token->token, 'pm_')) {
+        //     return;
+        // }
+
+        if (! $this->hasCompleteBillingAddress()) {
+            throw new PaymentFailed('A complete billing address is required to use this bank account.', 400);
+        }
+
+        $this->init();
+
+        PaymentMethod::update(
+            $token->token,
+            ['billing_details' => ['address' => $this->stripeBillingAddress()]],
+            $this->stripe_connect_auth
+        );
+    }
+
     public function updateStripeCustomer($customer)
     {
         //Else create a new record
@@ -694,7 +739,7 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
         /** Response from Stripe SDK/API. */
         $response = null;
         $refund_data = [];
-        
+
         if (str_starts_with($payment->transaction_reference ?? '', 'pi_')) {
             $refund_data['payment_intent'] = $payment->transaction_reference;
         } else {
@@ -815,6 +860,11 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
             $ach->handleSetupIntentSucceeded($request->all());
         }
 
+        if ($request->type === 'setup_intent.setup_failed') {
+            $ach = new ACH($this);
+            $ach->handleSetupIntentFailed($request->all());
+        }
+
         if ($request->type === 'payment_intent.processing') {
             PaymentIntentProcessingWebhook::dispatch($request->data, $request->company_key, $this->company_gateway->id)->delay(now()->addSeconds(5));
             return response()->json([], 200);
@@ -889,40 +939,10 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
             // Will notify customer on updated information
             return response()->json([], 200);
         } elseif ($request->type === "mandate.updated") {
-            if ($request->data['object']['status'] == "active") {
-                // Check if payment method existsn
-                $payment_method = (string) $request->data['object']['payment_method'];
+            $ach = new ACH($this);
+            $ach->handleMandateUpdated($request->all());
 
-                $clientgateway = ClientGatewayToken::query()
-                    ->where('token', $payment_method)
-                    ->first();
-
-                if ($clientgateway) {
-                    $meta = $clientgateway->meta;
-                    $meta->state = 'authorized';
-                    $clientgateway->meta = $meta;
-                    $clientgateway->save();
-                }
-
-                return response()->json([], 200);
-            } elseif ($request->data['object']['status'] == "inactive" && $request->data['object']['payment_method']) {
-                $clientgateway = ClientGatewayToken::query()
-                    ->where('token', $request->data['object']['payment_method'])
-                    ->first();
-
-                if ($clientgateway && !str_starts_with($clientgateway->token, 'ba_')) { //ba_ tokens should not be deleted
-                    
-                    $meta = $clientgateway->meta;
-                    $meta->state = 'inactive';
-                    $clientgateway->meta = $meta;
-                    $clientgateway->save();
-                    // $clientgateway->delete();
-                }
-
-                return response()->json([], 200);
-            } elseif ($request->data['object']['status'] == "pending") {
-                return response()->json([], 200);
-            }
+            return response()->json([], 200);
         }
 
         return response()->json([], 200);
@@ -1146,7 +1166,6 @@ class StripePaymentDriver extends BaseDriver implements SupportsHeadlessInterfac
             nlog("Stripe auth error: " . $th->getMessage());
             return 'error';
         }
-
 
     }
 

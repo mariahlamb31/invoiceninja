@@ -46,7 +46,6 @@ use App\Http\Controllers\ExportController;
 use App\Http\Controllers\FeedbackController;
 use App\Http\Controllers\FilterController;
 use App\Http\Controllers\GroupSettingController;
-use App\Http\Controllers\HostedMigrationController;
 use App\Http\Controllers\ImportController;
 use App\Http\Controllers\ImportJsonController;
 use App\Http\Controllers\ImportQuickbooksController;
@@ -55,6 +54,7 @@ use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\LicenseController;
 use App\Http\Controllers\LocationController;
 use App\Http\Controllers\LogoutController;
+use App\Http\Controllers\MailerController;
 use App\Http\Controllers\MailgunController;
 use App\Http\Controllers\MigrationController;
 use App\Http\Controllers\OneTimeTokenController;
@@ -141,6 +141,8 @@ use Illuminate\Support\Facades\Route;
 Route::group(['middleware' => ['throttle:api', 'api_secret_check']], function () {
     Route::post('api/v1/signup', [AccountController::class, 'store'])->name('signup.submit')->middleware('throttle:signup');
     Route::post('api/v1/oauth_login', [LoginController::class, 'oauthApiLogin']);
+    Route::get('api/v1/oidc/config', [LoginController::class, 'oidcConfig'])->name('oidc.config');
+    Route::post('api/v1/oidc/exchange', [LoginController::class, 'oidcExchange'])->name('oidc.exchange')->middleware('throttle:30,1');
 });
 
 Route::group(['middleware' => ['throttle:precheck']], function () {
@@ -491,6 +493,7 @@ Route::group(['middleware' => ['throttle:api', 'token_auth', 'valid_json','local
     // Route::delete('hooks/{subscription_id}', [SubscriptionController::class, 'unsubscribe'])->name('hooks.unsubscribe');
 
     Route::post('smtp/check', [SmtpController::class, 'check'])->name('smtp.check')->middleware('throttle:10,1');
+    Route::post('mailer/check', [MailerController::class, 'check'])->name('mailer.check')->middleware('throttle:10,1');
 
     Route::post('stripe/update_payment_methods', [StripeController::class, 'update'])->middleware('password_protected')->name('stripe.update');
     Route::post('stripe/import_customers', [StripeController::class, 'import'])->middleware('password_protected')->name('stripe.import');
@@ -541,7 +544,9 @@ Route::post('api/v1/yodlee/data_updates', [YodleeController::class, 'dataUpdates
 Route::post('api/v1/yodlee/refresh_updates', [YodleeController::class, 'refreshUpdatesWebhook'])->middleware('throttle:100,1');
 Route::post('api/v1/yodlee/balance', [YodleeController::class, 'balanceWebhook'])->middleware('throttle:100,1');
 
-Route::get('api/v1/protected_download/{hash}', [ProtectedDownloadController::class, 'index'])->name('protected_download')->middleware('throttle:300,1');
+Route::get('api/v1/protected_download/{hash}', [ProtectedDownloadController::class, 'index'])
+    ->name('protected_download')
+    ->middleware(['protected_download.signature', 'throttle:300,1']);
 Route::post('api/v1/ppcp/webhook', [PayPalPPCPPaymentDriver::class, 'processWebhookRequest'])->middleware('throttle:1000,1');
 
 Route::get('api/v1/calendar_connection/{provider}/authorize/{hash}', [CalendarConnectionController::class, 'redirectToProvider'])->name('calendar_connection.authorize')->middleware('throttle:10,1');
